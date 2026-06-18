@@ -1,0 +1,14 @@
+# ---- Extract: Apify API client --------------------------------------
+apify-client==1.7.1
+
+# ---- Transform: Spark runs locally inside the container -------------
+pyspark==3.5.3
+pyarrow
+
+# ---- Warehouse connectivity ----------------------------------------
+psycopg2-binary
+SQLAlchemy
+
+# ---- Configuration --------------------------------------------------
+PyYAML
+python-dotenv

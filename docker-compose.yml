@@ -1,0 +1,134 @@
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: madi/airflow:2.10.3
+  env_file:
+    - .env
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY:-}"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    PYTHONPATH: /opt/airflow
+    # --- Connection details consumed by ETL scripts & dbt -----------
+    DWH_HOST: ${POSTGRES_HOST}
+    DWH_PORT: ${POSTGRES_PORT}
+    DWH_USER: ${POSTGRES_USER}
+    DWH_PASSWORD: ${POSTGRES_PASSWORD}
+    DWH_DATABASE: ${DWH_DATABASE}
+    DWH_STAGING_SCHEMA: ${DWH_STAGING_SCHEMA}
+    APIFY_API_TOKEN: ${APIFY_API_TOKEN}
+    APIFY_ACTOR_ID: ${APIFY_ACTOR_ID}
+    DBT_BIN: /opt/dbt_venv/bin/dbt
+  volumes:
+    - ./pipelines:/opt/airflow/dags        # Airflow reads DAGs from here
+    - ./etl:/opt/airflow/etl
+    - ./src:/opt/airflow/src
+    - ./config:/opt/airflow/config
+    - ./dbt:/opt/airflow/dbt
+    - ./data:/opt/airflow/data
+    - ./tests:/opt/airflow/tests
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+
+services:
+  # -------------------------------------------------------------------
+  #  PostgreSQL — Airflow metadata + Data Warehouse (init script
+  #  creates the `madi_dwh` database and `staging` schema on first boot)
+  # -------------------------------------------------------------------
+  postgres:
+    image: postgres:16
+    container_name: madi_postgres
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      DWH_DATABASE: ${DWH_DATABASE}
+      DWH_STAGING_SCHEMA: ${DWH_STAGING_SCHEMA}
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  # -------------------------------------------------------------------
+  #  One-shot initializer: migrate metadata DB + create admin user
+  # -------------------------------------------------------------------
+  airflow-init:
+    <<: *airflow-common
+    container_name: madi_airflow_init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        echo "Running airflow db migrate..."
+        airflow db migrate
+        echo "Creating admin user (idempotent)..."
+        airflow users create \
+          --username "${AIRFLOW_ADMIN_USERNAME:-admin}" \
+          --password "${AIRFLOW_ADMIN_PASSWORD:-admin}" \
+          --firstname Admin --lastname User --role Admin \
+          --email admin@example.com || true
+        echo "Init complete."
+    restart: on-failure
+
+  # -------------------------------------------------------------------
+  #  Web UI
+  # -------------------------------------------------------------------
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: madi_airflow_webserver
+    command: webserver
+    ports:
+      - "${AIRFLOW_WEBSERVER_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # -------------------------------------------------------------------
+  #  Scheduler (runs the tasks with LocalExecutor)
+  # -------------------------------------------------------------------
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: madi_airflow_scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-db-volume:

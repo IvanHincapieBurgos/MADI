@@ -1,0 +1,77 @@
+# =====================================================================
+#  MADI — Centralized configuration
+#
+#  * Single source of truth for every pipeline parameter.
+#  * Values written as ${VAR} are resolved at LOAD TIME from environment
+#    variables (populated by .env locally or by docker-compose in
+#    containers). NEVER hardcode secrets here — only ${references}.
+#  * The optional ${VAR:-default} form supplies a fallback.
+# =====================================================================
+
+project:
+  name: madi
+  description: "Medellín apartments rental pipeline (Medallion architecture)"
+  timezone: "America/Bogota"   # Colombia (COT) — applies to Medellín too
+
+# ---------------------------------------------------------------------
+#  Filesystem layout (relative to project root; resolved to absolute
+#  paths by the config loader regardless of the current working dir).
+# ---------------------------------------------------------------------
+paths:
+  raw_dir: "data/raw"             # Bronze  (JSON from Apify)
+  processed_dir: "data/processed" # Silver  (Parquet)
+
+# ---------------------------------------------------------------------
+#  Apify — knowten/finca-raiz-scraper
+#  run_input field names match the actor's published input schema.
+# ---------------------------------------------------------------------
+apify:
+  api_token: "${APIFY_API_TOKEN}"
+  actor_id: "${APIFY_ACTOR_ID:-knowten/finca-raiz-scraper}"
+
+  # Input payload sent to the actor. Kept intentionally broad: the
+  # precise "ideal housing" filter is applied later in dbt, so the
+  # warehouse keeps a richer dataset to analyze.
+  run_input:
+    operation: "arriendo"          # arriendo (rent) | venta (sale)
+    propertyType: "apartamentos"   # see actor schema for full enum
+    city: "Medellín"
+    scrapeDetails: true            # richer records (needed to derive pets)
+    maxItems: 200                  # cap volume (cost: ~$1 / 1,000 items)
+
+  # Run control
+  timeout_secs: 600                # max wait for the actor run to finish
+  memory_mbytes: 2048
+  build: "latest"
+
+# ---------------------------------------------------------------------
+#  PostgreSQL Data Warehouse (same container, separate DB from Airflow)
+# ---------------------------------------------------------------------
+warehouse:
+  host: "${DWH_HOST:-localhost}"
+  port: "${DWH_PORT:-5432}"
+  user: "${DWH_USER:-airflow}"
+  password: "${DWH_PASSWORD:-airflow}"
+  database: "${DWH_DATABASE:-madi_dwh}"
+  staging_schema: "${DWH_STAGING_SCHEMA:-staging}"
+  marts_schema: "marts"
+  staging_table: "stg_listings"    # Silver table loaded by PySpark
+  staging_write_mode: "append"     # append | overwrite (Spark JDBC mode)
+
+# ---------------------------------------------------------------------
+#  Business filters — the "ideal housing" criteria.
+#  Applied by the dbt gold model (fct/mart) to flag matching apartments.
+# ---------------------------------------------------------------------
+filters:
+  bedrooms: 3
+  allows_pets: true
+  max_price: 2500000
+  currency: "COP"
+
+# ---------------------------------------------------------------------
+#  Logging
+# ---------------------------------------------------------------------
+logging:
+  level: "${LOG_LEVEL:-INFO}"
+  format: "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+  date_format: "%Y-%m-%d %H:%M:%S"
